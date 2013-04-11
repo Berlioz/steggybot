@@ -43,7 +43,7 @@ Returns the set of evo materials necessary to advance to the next tier",
 Example !puzzlemon siren 24 30
 Calculates the amount of experience required to advance from TO to FROM.
 TO defaults to 1, FROM defaults to the maximum level of the puzzlemon.
-YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOO BLOOO"
+YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
   }
   
   def initialize(*args)
@@ -226,11 +226,6 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOO BLOOO"
     ultimate_count = busty_requirements.count
 		index = chain_members.index(puzzlemon_id)
 
-    p requirements.count
-    p busty_requirements.count
-    p ultimate_count
-    p index
-
     if index == requirements.length && ultimate_count > 0
       r = "Puzzlemon #{name} busty evolution materials:\n" +
           busty_requirements.
@@ -281,8 +276,7 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOO BLOOO"
     end
     pengies = delta.to_f / (45000.0)
     pengies = pengies.round(2)
-    r = "Getting puzzlemon #{name_from_nokogori(info)} from #{from} to #{to} 
-takes #{delta} xp, or #{pengies} pengdras. Get farming!"
+    r = "Getting puzzlemon #{name_from_nokogiri(info)} from #{from} to #{to} takes #{delta} xp, or #{pengies} pengdras. Get farming!"
     m.reply r    
   end
   
