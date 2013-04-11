@@ -1,5 +1,6 @@
 require 'cinch'
 require 'nokogiri'
+require 'pry'
 
 class Pazudora
   include Cinch::Plugin
@@ -34,7 +35,15 @@ Example !puzzlemon lookup horus, !puzzledex 603
 Returns a description of the puzzlemon. If none is found, returns a pseudorandom (hashed) one.",
     :list => "Usage: !puzzlemon list
 Example !puzzlemon list
-Returns a list of everyone's friends codes."
+Returns a list of everyone's friends codes.",
+    :evolution => "Usage: !puzzlemon evolution
+Example !puzzlemon siren evolution
+Returns the set of evo materials necessary to advance to the next tier",
+    :experience => "Usage: !puzzlemon experience [TO] [FROM]
+Example !puzzlemon siren 24 30
+Calculates the amount of experience required to advance from TO to FROM.
+TO defaults to 1, FROM defaults to the maximum level of the puzzlemon.
+YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOO BLOOO"
   }
   
   def initialize(*args)
@@ -54,6 +63,7 @@ Returns a list of everyone's friends codes."
       end
     rescue NoMethodError
       puts "Pazudora called with invalid command #{subr}."
+      raise
     end
   end
   
@@ -167,25 +177,182 @@ Returns a list of everyone's friends codes."
   
   def pazudora_lookup(m, args)
     identifier = args
-    info = get_puzzlemon_info(URI.encode(identifier))
-    
-    #Bypass puzzledragonx's "default to meteor dragon if you can't find the puzzlemon" mechanism to
-    #get a pseudorandom puzzlemon (up to the max currently released puzzlemon) instead.
-    meteor_dragon_id = "211"
-    highest_puzzledex_id = 603
-    
-    if info.css(".name").children.first.text == "Meteor Volcano Dragon" && !(identifier.start_with?("Meteor") || identifier == meteor_dragon_id)
-      num = (identifier.hash % highest_puzzledex_id) + 1
-      info = get_puzzlemon_info(URI.encode(num.to_s))
-    end
+    info = pdx_page_from_identifier(identifier)
+		m.reply "Unknown puzzlemon #{identifier}" and return unless info
     
     desc = info.css("meta [name=description]").first.attributes["content"].text
     desc.gsub!(/&amp;/, "&")
     m.reply desc
   end
+
+  def pazudora_chain(m, args)
+    identifier = args
+    info = pdx_page_from_identifier(identifier)
+		m.reply "Unknown puzzlemon #{identifier}" and return unless info
+
+    puzzlemon_id = id_from_nokogiri(info)
+
+		# Compute the ID numbers of the puzzlemons in this particular chain
+    chain_divs = info.xpath("//td[@class='evolve']//div[@class='eframenum']")
+		chain_members = chain_divs.map{|div| name_from_id(div.children.first.text)}
+		# Check whether there is a multi-choice ultimate evolution
+		ultimate_count = info.xpath("//td[@class='finalevolve']").length
+		if ultimate_count > 1
+      ((-1 * ultimate_count)..-1).step do |n|
+        chain_members[n] = "\t#{chain_members[n]} (busty)"
+      end
+    end
+
+    name = name_from_nokogiri(info)
+		r = "Puzzlemon #{name}'s evolution chain:\n" + chain_members.join("\n")
+    m.reply r    
+  end
+
+  def pazudora_evolution(m, args)
+    identifier = args
+    info = pdx_page_from_identifier(identifier)
+		m.reply "Unknown puzzlemon #{identifier}" and return unless info
+
+    puzzlemon_id = id_from_nokogiri(info)
+    name = name_from_nokogiri(info)
+
+		# Compute the ID numbers of the puzzlemons in this particular chain
+    chain_divs = info.xpath("//td[@class='evolve']//div[@class='eframenum']")
+		chain_members = chain_divs.map{|div| div.children.first.to_s}
+
+    # Compute the location of the current puzzlemon in the chain
+    requirements = info.xpath("//td[@class='require']")
+    busty_requirements = info.xpath("//td[@class='finalevolve']")
+    ultimate_count = busty_requirements.count
+		index = chain_members.index(puzzlemon_id)
+
+    p requirements.count
+    p busty_requirements.count
+    p ultimate_count
+    p index
+
+    if index == requirements.length && ultimate_count > 0
+      r = "Puzzlemon #{name} busty evolution materials:\n" +
+          busty_requirements.
+						map{|r| evo_material_list(r).join("\n")}.
+						join("\n\t-or-\t\n")
+    elsif index >= requirements.length
+      r = "Puzzlemon #{name} appears to be at the end of its chain."
+    else
+      r = "Puzzlemon #{name} evolution materials:\n" + 
+					evo_material_list(requirements[index]).join("\n") 
+    end
+    m.reply r
+  end
+
+  def pazudora_experience(m, args)
+    argv = args.split(" ")
+    tail = []
+
+    2.times do
+			if is_numeric?(argv.last)
+	      tail << argv.pop.to_i
+	    end
+    end
+
+    identifier = argv.join(" ")
+    info = pdx_page_from_identifier(identifier)
+		m.reply "Unknown puzzlemon #{identifier}" and return unless info
+
+    if tail.length == 0
+      from = 1
+      to = max_level(info)
+    elsif tail.length == 1
+      from = tail[0]
+      to = max_level(info)
+    else
+      to = tail[0]
+      from = tail[1]
+    end
+
+    links = info.xpath("//a").map{|element| element.attributes["href"]}.compact
+    curve_link = links.select{|link| link.value.include?("experiencechart")}.first
+    curve_page = Nokogiri::HTML(open(PUZZLEMON_BASE_URL + curve_link.value))
+    begin
+      delta = xp_at_level(curve_page, to) - xp_at_level(curve_page, from)
+    rescue NoMethodError
+      r = "Bad level thresholds #{from} - #{to}"
+      m.reply(r) and return
+    end
+    pengies = delta.to_f / (45000.0)
+    pengies = pengies.round(2)
+    r = "Getting puzzlemon #{name_from_nokogori(info)} from #{from} to #{to} 
+takes #{delta} xp, or #{pengies} pengdras. Get farming!"
+    m.reply r    
+  end
   
   protected
-  
+  # duh
+	def is_numeric?(str)
+	  begin
+	    !!Integer(str)
+	  rescue ArgumentError, TypeError
+	    false
+	  end
+	end
+
+	# given an id or monster name, uses pdx's fuzzy matcher to find the pdx
+  # page for the referenced monster. Returns nil if the fuzzy matcher returns
+  # nothing e.g meteor dragon what the fuck seriously jesus christ
+  def pdx_page_from_identifier(identifier)
+		info = get_puzzlemon_info(URI.encode(identifier))
+    
+    #Bypass puzzledragonx's "default to meteor dragon if you can't find the puzzlemon" mechanism
+    meteor_dragon_id = "211"
+
+    if info.css(".name").children.first.text == "Meteor Volcano Dragon" && !(identifier.start_with?("Meteor") || identifier == meteor_dragon_id)
+      return nil
+    else
+      return info
+    end
+  end
+
+	# turn an identifier, numeric or otherwise, into the true name of a monster
+  def name_from_id(id)
+		name_from_nokogiri(pdx_page_from_identifier(id))
+  end
+
+	# grab the name of a monster from its page the stupid way
+  def name_from_nokogiri(doc)
+		doc.css(".name").children.first.text
+  end
+
+  # find the URL of the image of the monster, and parse it for the monster's id
+  def id_from_nokogiri(doc)
+    avatar_image = doc.xpath("//div[@class='avatar']").first.children.first
+    path = avatar_image.attributes["src"].value
+    /img\/book\/(\d+)\.png/.match(path)[1]
+  end
+
+  # convert a requirements td into a list of evolution materials
+  def evo_material_list(td)
+    material_elements = td.children.select{|element| element.name == "a"}
+    material_elements.map do |element|
+      element.children.first.attributes["title"].value
+    end
+  end
+
+  # given an XP curve page, return the XP required to hit a level from 0
+  def xp_at_level(doc, level)
+    all_elements = doc.xpath("//table[@id='tablechart']//tbody//td")
+    rows = doc.xpath("//table[@id='tablechart']//tbody//td[@class='blue']")
+    row_index = all_elements.index(rows.select{|h| h.text == level.to_s}.first)
+    all_elements[row_index + 1].text.to_i
+  end
+
+  # given a pazudora info page, find the max level of the monster
+  def max_level(doc)
+    level_row = doc.xpath("//table[@id = 'tablestat']//td[@class = 'title']").
+			select{|x| x.text == "Level:"}.first
+		siblings = level_row.parent.children
+    siblings[2].text.to_i
+  end
+
   def mangle(s)
     s.chop + "." + s[-1]
   end
@@ -216,4 +383,5 @@ Returns a list of everyone's friends codes."
     puzzlemon_info = Nokogiri::HTML(open(search_url))
   end
 end
+
 
