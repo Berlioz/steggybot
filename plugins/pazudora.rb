@@ -1,11 +1,14 @@
 require 'cinch'
 require 'nokogiri'
 require 'pry'
+require 'open-uri'
 
 class Pazudora
   include Cinch::Plugin
   
   PUZZLEMON_BASE_URL = "http://www.puzzledragonx.com/en/"
+  GACHA_URL = "http://www.puzzledragonx.com/egg.asp"
+  RANK_TABLE_URL = "http://www.puzzledragonx.com/en/levelchart.asp"
   
   match /pazudora ([\w-]+) *(.+)*/i, method: :pazudora
   match /stupidpuzzledragonbullshit ([\w-]+) *(.+)*/i, method: :pazudora
@@ -17,7 +20,7 @@ class Pazudora
   
   @help_string = <<-eos
   Puzzle and Dragons (on iOS and Android) utility functions. Mostly collects friend codes and tracks the daily dungeon.
-  Its commands are aliased to pazudora, p&d, pad,  and puzzlemon.
+  Its commands are aliased to pazudora, p&d, pad, and puzzlemon.
   eos
   @help_hash = {
     :add => "Usage: !puzzlemon add NAME CODE
@@ -29,21 +32,50 @@ Returns the daily dungeon group that the user belongs to.",
     :dailies => "Usage: !puzzlemon dailies
 Example !puzzlemon dailies
 Returns the times (and type) of today's daily dungeons, split by group. If called by
-a registered player, also reminds them of their group id.",
+a registered player, also reminds them of their group id. Buggy.",
     :lookup => "Usage: !(puzzlemon lookup|puzzledex) (NAME|ID)
 Example !puzzlemon lookup horus, !puzzledex 603
-Returns a description of the puzzlemon. If none is found, returns a pseudorandom (hashed) one.",
+Returns a description of the puzzlemon. Aliases: dex",
     :list => "Usage: !puzzlemon list
 Example !puzzlemon list
 Returns a list of everyone's friends codes.",
+    :chain => "Usage: !puzzlemon chain (NAME|ID)
+Example !puzzlemon chain siren
+Returns a sumary of the given puzzlemon's evolutionary family.",
     :evolution => "Usage: !puzzlemon evolution
-Example !puzzlemon siren evolution
-Returns the set of evo materials necessary to advance to the next tier",
-    :experience => "Usage: !puzzlemon experience [TO] [FROM]
-Example !puzzlemon siren 24 30
-Calculates the amount of experience required to advance from TO to FROM.
-TO defaults to 1, FROM defaults to the maximum level of the puzzlemon.
-YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
+Example !puzzlemon evolution siren
+Returns the set of evo materials necessary to advance to the next tier. Aliases: materials, mats, evolve",
+    :experience => "Usage: !puzzlemon experience [FROM]
+Example !puzzlemon siren 24
+Calculates the amount of experience required to max out this puzzlemon. From defaults to 1.
+Aliases: exp, level. YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO",
+   :rank => "Usage: !puzzlemon rank (RANK|TO FROM)
+Example !puzzlemon rank 60, !puzzlemon rank 100 120
+Returns information about a given player rank, or calculates the deltas between them.
+Reverse lookup also possible: !puzzlemon rank stamina 100 computes when you will get 100 stamina.",
+   :gacha => "Usage: !puzzlemon gacha
+Simulates a pull from the rare egg machine. No, this doesn't take events or weighting into account and is in fact almost certainly horrifyingly wrong in every particular.
+User !puzzlemon gacha MONSTER to learn how many rolls you'll need to get that monster, e.g !pad gacha Horus
+Are you feeling lucky? This command can change that. Aliases: pull, roll",
+   :stamina => "Usage: !puzzlemon stamina START END TIMEZONE
+Computes how long it will take to go from START (default 0) to END stamina, and when it will happen in your timezone.
+Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pacific standard)."
+  }
+
+  HELP = @help_hash
+
+  ALIAS = {
+    "delete" => "remove",
+    "dex" => "lookup",
+    "evolve" => "evolution",
+    "materials" => "evolution",
+    "mats" => "evolution",
+    "xp" => "experience",
+    "exp" => "experience",
+    "level" => "experience",
+    "pull" => "gacha",
+    "roll" => "gacha",
+    "stam" => "stamina"
   }
   
   def initialize(*args)
@@ -55,6 +87,7 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
   #can be accessed by the user using the construction "!puzzlemon something [args]".
   def pazudora (m, cmd, args)
     subr = cmd.downcase.chomp
+    subr = ALIAS[subr] || subr
     begin
       if args
         self.send("pazudora_#{subr}", m, args)
@@ -64,6 +97,18 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
     rescue NoMethodError
       puts "Pazudora called with invalid command #{subr}."
       raise
+    end
+  end
+
+  def pazudora_help(m, args)
+    if args == ""
+      r = "Usage: !pad help COMMAND.\n"
+      r += "Registered commands are: #{HELP.keys.join(', ')}"
+      m.reply r
+    else
+      helpstr = HELP[args.to_sym]
+      m.reply "Unknown subcommand #{args}" and return unless helpstr
+      m.reply helpstr
     end
   end
   
@@ -100,7 +145,7 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
     username = pargs[0]
     friend_codes = load_data || {}
     
-    if ! friend_codes[username]
+    if !friend_codes[username]
       m.reply "#{m.user.nick}: #{mangle(username)} not in friend code list."
       return
     end
@@ -177,150 +222,182 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
   
   def pazudora_lookup(m, args)
     identifier = args
-    info = pdx_page_from_identifier(identifier)
-		m.reply "Unknown puzzlemon #{identifier}" and return unless info
-    
-    desc = info.css("meta [name=description]").first.attributes["content"].text
-    desc.gsub!(/&amp;/, "&")
-    m.reply desc
+    pdx = PazudoraData.instance.get_puzzlemon(identifier)
+    m.reply "Could not find puzzlemon #{identifier}" and return if pdx.nil?
+    m.reply pdx.lookup_output
   end
 
   def pazudora_chain(m, args)
     identifier = args
-    info = pdx_page_from_identifier(identifier)
-		m.reply "Unknown puzzlemon #{identifier}" and return unless info
-
-    puzzlemon_id = id_from_nokogiri(info)
-
-		# Compute the ID numbers of the puzzlemons in this particular chain
-    chain_divs = info.xpath("//td[@class='evolve']//div[@class='eframenum']")
-		chain_members = chain_divs.map{|div| name_from_id(div.children.first.text)}
-		# Check whether there is a multi-choice ultimate evolution
-		ultimate_count = info.xpath("//td[@class='finalevolve']").length
-		if ultimate_count > 1
-      ((-1 * ultimate_count)..-1).step do |n|
-        chain_members[n] = "\t#{chain_members[n]} (busty)"
-      end
-    end
-
-    name = name_from_nokogiri(info)
-		r = "Puzzlemon #{name}'s evolution chain:\n" + chain_members.join("\n")
-    m.reply r    
+    pdx = PazudoraData.instance.get_puzzlemon(identifier)
+    m.reply "Could not find puzzlemon #{identifier}" and return if pdx.nil?
+    m.reply pdx.chain_output
   end
 
   def pazudora_evolution(m, args)
     identifier = args
-    info = pdx_page_from_identifier(identifier)
-		m.reply "Unknown puzzlemon #{identifier}" and return unless info
-
-    puzzlemon_id = id_from_nokogiri(info)
-    name = name_from_nokogiri(info)
-
-		# Compute the ID numbers of the puzzlemons in this particular chain
-    chain_divs = info.xpath("//td[@class='evolve']//div[@class='eframenum']")
-		chain_members = chain_divs.map{|div| div.children.first.to_s}
-
-    # Compute the location of the current puzzlemon in the chain
-    requirements = info.xpath("//td[@class='require']")
-    busty_requirements = info.xpath("//td[@class='finalevolve']")
-    ultimate_count = busty_requirements.count
-		index = chain_members.index(puzzlemon_id)
-
-    if index == requirements.length && ultimate_count > 0
-      r = "Puzzlemon #{name} busty evolution materials:\n" +
-          busty_requirements.
-						map{|r| evo_material_list(r).join("\n")}.
-						join("\n\t-or-\t\n")
-    elsif index >= requirements.length
-      r = "Puzzlemon #{name} appears to be at the end of its chain."
-    else
-      r = "Puzzlemon #{name} evolution materials:\n" + 
-					evo_material_list(requirements[index]).join("\n") 
-    end
-    m.reply r
+    pdx = PazudoraData.instance.get_puzzlemon(identifier)
+    m.reply "Could not find puzzlemon #{identifier}" and return if pdx.nil?
+    m.reply pdx.mats_output
   end
 
   def pazudora_experience(m, args)
     argv = args.split(" ")
-    tail = []
-
-    2.times do
-			if is_numeric?(argv.last)
-	      tail << argv.pop.to_i
-	    end
-    end
-
-    identifier = argv.join(" ")
-    info = pdx_page_from_identifier(identifier)
-		m.reply "Unknown puzzlemon #{identifier}" and return unless info
-
-    if tail.length == 0
-      from = 1
-      to = max_level(info)
-    elsif tail.length == 1
-      from = tail[0]
-      to = max_level(info)
+		if is_numeric?(argv.last)
+	    from = argv.pop.to_i
     else
-      to = tail[0]
-      from = tail[1]
+      from = 1
+	  end
+    identifier = args
+    pdx = PazudoraData.instance.get_puzzlemon(identifier)
+    m.reply "Could not find puzzlemon #{identifier}" and return if pdx.nil?
+    m.reply pdx.experience_output(from)
+  end
+
+  def pazudora_stamina(m, args)
+    argv = args.split(" ")
+    if argv.last.match(/(\+|\-)\d+/)
+      timezone = argv.pop
+      offset = timezone.to_i
+      offset = offset * -1 if offset < 0
+      if offset > 0 && offset < 10
+        offset = "0#{offset}"
+      elsif offset >= 24
+        m.reply "Invalid UTC offset #{offset}" and return
+      else
+        offset = offset.to_s
+      end
+      utc = "#{timezone[0,1]}#{offset}:00"
+    else
+      utc = "-07:00"
     end
 
-    links = info.xpath("//a").map{|element| element.attributes["href"]}.compact
-    curve_link = links.select{|link| link.value.include?("experiencechart")}.first
-    curve_page = Nokogiri::HTML(open(PUZZLEMON_BASE_URL + curve_link.value))
-    begin
-      delta = xp_at_level(curve_page, to) - xp_at_level(curve_page, from)
-    rescue NoMethodError
-      r = "Bad level thresholds #{from} - #{to}"
-      m.reply(r) and return
+    argv = argv.map(&:to_i)
+    if argv.length == 2
+      from = argv.first
+      to = argv.last
+    elsif argv.length == 1
+      from = 0
+      to = argv.last
+    else
+      m.reply "USAGE: !pad stamina TO? FROM TIMEZONE?"
     end
-    pengies = delta.to_f / (45000.0)
-    pengies = pengies.round(2)
-    r = "Getting puzzlemon #{name_from_nokogiri(info)} from #{from} to #{to} takes #{delta} xp, or #{pengies} pengdras. Get farming!"
-    m.reply r    
+
+    stamina_delta = to - from
+    time_delta = stamina_delta * 60 * 10
+    target_time = Time.now + time_delta
+    target_time = target_time.getlocal(utc)
+    r = "You will gain #{stamina_delta} stamina (#{from}-#{to}) in ~#{stamina_delta * 10} minutes," +
+        target_time.strftime(" or around %I:%M%p UTC") + utc
+    m.reply r
+  end
+
+  def pazudora_gacha(m, args)
+    argv = args.split(" ")
+    if !argv.last.nil? && argv.last.match(/\+\S+/)
+      godfest_flags = argv.last.split(//)[1..-1].map(&:upcase)
+      args = args.split("+").first.strip
+    else
+      godfest_flags = []
+    end
+
+    if args == "tags" || args == "list_tags"
+      r = "Use +[tags] to denote godfest; for example !pad pull +JGO for a japanese/greek/odins fest.\n"
+      r += "Known tags: [R]oman, [J]apanese, [H]indu, [N]orse, [E]gyptian, [G]reek, [O]dins"
+      m.reply r
+    elsif args == ""
+      p godfest_flags
+      pdx = PazudoraData.instance.gachapon(godfest_flags)
+      stars = pdx.stars
+      type = pdx.type
+      name = pdx.name
+
+      if name.include?("Golem") || name.include?("Guardian")
+        golem = true
+        name = e_a_r_t_h_g_o_l_e_m(name)
+      end
+
+      if stars >= 5 && type == "god" && !pdx.name.include?("Verche")
+        msg =  (stars == 6 ? "Lucky bastard!" : "Lucky bastard.")
+      elsif stars == 5
+        msg = "Meh."
+      elsif golem
+        msg = "Y O U I D I O T."
+      else
+        msg = "I just saved you $5."
+      end
+      r = "You got #{name}, a #{stars}* #{type}. #{msg}"
+      m.reply(r)
+    else
+      regex = false
+      identifier = args.strip.downcase
+      if identifier.match(/\A\/.*\/\z/)
+        regex = true
+        identifier = Regexp.new("#{identifier[1..-2]}")
+      end
+      attempts = 0
+      pdx = nil
+      loop do
+        attempts = attempts + 1
+        pdx = PazudoraData.instance.gachapon(godfest_flags)
+        next unless pdx.valid?
+        break if !regex && (pdx.name.downcase.include?(identifier) || pdx.id == identifier)
+        break if regex && (pdx.name.downcase.match(identifier) || pdx.name.match(identifier))
+        m.reply("Unable to roll #{identifier}") and return if attempts == 10000
+      end
+      m.reply("After #{attempts} attempts, you rolled a #{pdx.name}. (There goes $#{attempts * 5})")
+    end
+  end
+
+  def pazudora_rank(m, args)
+    argv = args.split(" ")
+    if argv.length == 1
+      data = rank_data[argv.first]
+      m.reply("No data for rank #{argv.first}") and return unless data
+      r = "Rank #{argv.first}: cost #{data[:cost]}, stamina #{data[:stamina]}, friends #{data[:friends]}, total experience #{data[:exp_total]}, next level #{data[:exp_next]}"
+      r.gsub!("--", "??")
+    elsif argv.length == 2 && ["cost", "stamina", "friends"].include?(argv.first)
+      search_stat = argv.first.to_sym
+      m.reply("Bad search value #{argv.last}") and return unless is_numeric?(argv.last)
+      search_value = argv.last.to_i
+      rank_data.each do |k, v|
+        if v[search_stat].to_i >= search_value
+          m.reply("You will get >= #{search_value} #{search_stat} at rank #{k}") and return
+        end
+      end
+      m.reply("Unable to reverse lookup #{search_value} #{search_stat}") and return
+    elsif argv.length == 2
+      data = rank_data
+      input = argv.map(&:to_i).sort
+      alpha = data[input.first.to_s]
+      omega = data[input.last.to_s]
+      exp_data_missing = input.last >= 148
+
+      delta_cost = omega[:cost].to_i - alpha[:cost].to_i
+      delta_stamina = omega[:stamina].to_i - alpha[:stamina].to_i
+      delta_friends = omega[:friends].to_i - alpha[:friends].to_i
+
+      r = "Ranks #{input.first}-#{input.last}: cost +#{delta_cost}, stamina +#{delta_stamina}, friends +#{delta_friends}"
+
+      if exp_data_missing
+        r += ".\nWarning: PDX experience values missing for ranks >= 148"
+      else
+        delta_exp = omega[:exp_total].to_i - alpha[:exp_total].to_i
+        r += ", experience +#{delta_exp}."
+      end
+    else
+      r = "Usage: !pad rank n for data about rank n, !pad rank x y to compute deltas between x and y, !pad <field> n for reverse lookup"
+    end
+    m.reply(r)
   end
   
   protected
-  # duh
-	def is_numeric?(str)
-	  begin
-	    !!Integer(str)
-	  rescue ArgumentError, TypeError
-	    false
-	  end
-	end
-
-	# given an id or monster name, uses pdx's fuzzy matcher to find the pdx
-  # page for the referenced monster. Returns nil if the fuzzy matcher returns
-  # nothing e.g meteor dragon what the fuck seriously jesus christ
-  def pdx_page_from_identifier(identifier)
-		info = get_puzzlemon_info(URI.encode(identifier))
-    
-    #Bypass puzzledragonx's "default to meteor dragon if you can't find the puzzlemon" mechanism
-    meteor_dragon_id = "211"
-
-    if info.css(".name").children.first.text == "Meteor Volcano Dragon" && !(identifier.start_with?("Meteor") || identifier == meteor_dragon_id)
-      return nil
-    else
-      return info
+  def is_numeric?(str)
+    begin
+      !!Integer(str)
+    rescue ArgumentError, TypeError
+      false
     end
-  end
-
-	# turn an identifier, numeric or otherwise, into the true name of a monster
-  def name_from_id(id)
-		name_from_nokogiri(pdx_page_from_identifier(id))
-  end
-
-	# grab the name of a monster from its page the stupid way
-  def name_from_nokogiri(doc)
-		doc.css(".name").children.first.text
-  end
-
-  # find the URL of the image of the monster, and parse it for the monster's id
-  def id_from_nokogiri(doc)
-    avatar_image = doc.xpath("//div[@class='avatar']").first.children.first
-    path = avatar_image.attributes["src"].value
-    /img\/book\/(\d+)\.png/.match(path)[1]
   end
 
   # convert a requirements td into a list of evolution materials
@@ -331,24 +408,39 @@ YES I KNOW THERE ARE NO LIGHT/DARK PENGDRAS A BLOOO BOO HOO"
     end
   end
 
-  # given an XP curve page, return the XP required to hit a level from 0
-  def xp_at_level(doc, level)
-    all_elements = doc.xpath("//table[@id='tablechart']//tbody//td")
-    rows = doc.xpath("//table[@id='tablechart']//tbody//td[@class='blue']")
-    row_index = all_elements.index(rows.select{|h| h.text == level.to_s}.first)
-    all_elements[row_index + 1].text.to_i
-  end
-
-  # given a pazudora info page, find the max level of the monster
-  def max_level(doc)
-    level_row = doc.xpath("//table[@id = 'tablestat']//td[@class = 'title']").
-			select{|x| x.text == "Level:"}.first
-		siblings = level_row.parent.children
-    siblings[2].text.to_i
+  def rank_data
+    ranks = Nokogiri::HTML.parse(open(RANK_TABLE_URL).read)
+    rows = ranks.xpath("//table[@id='tablechart']").first.children
+    rv = {}
+    rows[2..-1].each do |row|
+      cells = row.children
+      level = cells[0].children.to_s
+      cost = cells[1].children.to_s
+      stamina = cells[2].children.to_s
+      friends = cells[3].children.to_s
+      exp_total = cells[4].children.to_s
+      exp_next = cells[5].children.to_s
+      rv[level] = {cost:cost,
+                   stamina:stamina, 
+                   friends:friends,
+                   exp_total:exp_total,
+                   exp_next:exp_next}
+    end
+    rv
   end
 
   def mangle(s)
     s.chop + "." + s[-1]
+  end
+
+  def e_a_r_t_h_g_o_l_e_m(s)
+    out = ""
+    s.each_char do |chr|
+      next if chr == " "
+      out += chr.upcase
+      out += " "
+    end
+    out.strip
   end
   
   def load_data
