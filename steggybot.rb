@@ -6,7 +6,7 @@ bot = Cinch::Bot.new do
   configure do |c|
     c.server = "irc.freenode.net"
     c.nick = "asterbot"
-    c.channels = ["#csuapad"]
+    c.channels = ["#csuapad", "#csuatest"]
     c.plugins.plugins = [Pazudora]
     c.plugins.plugins << Help
     c.plugins.options[Pazudora] = {

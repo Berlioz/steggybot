@@ -3,7 +3,7 @@ require 'nokogiri'
 require 'pry'
 require 'json'
 
-PDX_MONSTER_COUNT = 606
+PDX_MONSTER_COUNT = 683
 
 class Puzzlemon
   PUZZLEMON_BASE_URL = "http://www.puzzledragonx.com/en/"

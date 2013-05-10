@@ -245,6 +245,7 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
     argv = args.split(" ")
     if is_numeric?(argv.last)
       from = argv.pop.to_i
+      args = argv.join(" ")
     else
       from = 1
     end
@@ -305,9 +306,10 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       r = "Use +[tags] to denote godfest; for example !pad pull +JGO for a japanese/greek/odins fest.\n"
       r += "Known tags: [R]oman, [J]apanese, [H]indu, [N]orse, [E]gyptian, [G]reek, [O]dins"
       m.reply r
-    elsif is_numeric?(args)
+    elsif is_numeric?(args) || args.match(/^\$\d+$/)
       gods = []
-      args.to_i.times do
+      attempts = is_numeric?(args) ? args.to_i : (stones_buyable(args.split("$").last.to_i)/5)
+      attempts.times do
         pdx = PazudoraData.instance.gachapon(godfest_flags)
         stars = pdx.stars
         type = pdx.type
@@ -321,11 +323,11 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
         overflow = gods.length - 10
         gods = gods[0..9]
       end
-      price = stone_price(args.to_i * 5)
+      price = stone_price(attempts * 5)
       if gods.length == 0
-        r = "You rolled #{args} times (for $#{price}) and got jackshit all. Gungtrolled."
+        r = "You rolled #{attempts} times (for $#{price}) and got jackshit all. Gungtrolled."
       else
-        r = "You rolled #{args} times (for $#{price}) and got some gods:\n"
+        r = "You rolled #{attempts} times (for $#{price}) and got some gods:\n"
         r += gods.join(", ")
         if overflow > 0
           r += "...and #{overflow} more"
@@ -444,6 +446,17 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       money = money + prices[selection]
     end
     money
+  end
+
+  def stones_buyable(dollars)
+    prices = {1 => 1, 5 => 6, 10 => 12, 23 => 30, 44 => 60, 60 => 85}
+    stones = 0
+    while dollars > 0
+      selection = prices.keys.select{|x| x <= dollars}.max
+      stones += prices[selection]
+      dollars -= selection
+    end
+    stones
   end
 
   def rank_data
