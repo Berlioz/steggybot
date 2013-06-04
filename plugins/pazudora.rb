@@ -2,6 +2,8 @@ require 'cinch'
 require 'nokogiri'
 require 'pry'
 require 'open-uri'
+require 'calc'
+require 'distribution'
 
 class Pazudora
   include Cinch::Plugin
@@ -54,17 +56,29 @@ Example !puzzlemon rank 60, !puzzlemon rank 100 120
 Returns information about a given player rank, or calculates the deltas between them.
 Reverse lookup also possible: !puzzlemon rank stamina 100 computes when you will get 100 stamina.",
       :gacha => "Usage: !puzzlemon gacha
-Simulates a pull from the rare egg machine. No, this doesn't take events or weighting into account and is in fact almost certainly horrifyingly wrong in every particular.
+Simulates (poorly) a pull from the rare egg machine. Supports godfest modifiders--use !pad gacha tags for more information.
 User !puzzlemon gacha MONSTER to learn how many rolls you'll need to get that monster, e.g !pad gacha Horus
 Are you feeling lucky? This command can change that. Aliases: pull, roll",
       :stamina => "Usage: !puzzlemon stamina START END TIMEZONE
 Computes how long it will take to go from START (default 0) to END stamina, and when it will happen in your timezone.
-Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pacific standard)."
+Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pacific daylight savings).",
+      :time => "Usage: !puzzlemon time STAMINA TIME TIMEZONE
+Computes how much stamina you will have at TIME, assuming you have STAMINA stamina right now (default 0).
+Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pacific daylight savings).",
+      :calc => "Usage: !puzzlemon calc expr
+Computes an arbitrary mathematical expression in ruby. It's sanitized so don't try and funny shit. USE FLOATING POINTS.
+Example: !pad calc 0.8 ** 5 for your odds of getting screwed on a 5 skillup feed.",
+      :skillup => "Usage: !puzzlemon skillup K, N, p?
+Computes the probability of getting K or more skillups in N feeds, assuming a skillup probability p (default 0.2).
+Backed by somebody else's cdf function; if you get a crpytic domain error you've typed something in wrong. Probably.
+Aliases: skill, cdf, bino, binomial"
   }
 
   HELP = @help_hash
 
   ALIAS = {
+      "code" => "who",
+      "fc" => "who",
       "delete" => "remove",
       "dex" => "lookup",
       "evolve" => "evolution",
@@ -75,7 +89,12 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       "level" => "experience",
       "pull" => "gacha",
       "roll" => "gacha",
-      "stam" => "stamina"
+      "stam" => "stamina",
+      "math" => "calc",
+      "skill" => "skillup",
+      "cdf" => "skillup",
+      "bino" => "skillup",
+      "binomial" => "skillup"
   }
 
   def initialize(*args)
@@ -110,6 +129,46 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       m.reply "Unknown subcommand #{args}" and return unless helpstr
       m.reply helpstr
     end
+  end
+
+  def pazudora_calc(m, args)
+    output = Calc.evaluate(args.gsub(/\^/, "**"))
+    if output.respond_to?(:round)
+      if output.to_s.include?(".")
+        m.reply "#{args} = %.3f" % output
+      else
+        m.reply "#{args} = #{output}"
+      end
+    else
+      m.reply "Could not interpret #{args} as a mathematical expression"
+    end
+  end
+
+  def pazudora_skillup(m, args)
+    argv = args.split(" ")
+    if argv.length == 3
+      k = argv[0].to_i
+      n = argv[1].to_i
+      p = argv[2].to_f
+    elsif argv.length == 2
+      k = argv[0].to_i
+      n = argv[1].to_i
+      p = 0.2
+    else
+      m.reply ("USAGE: !pad skillup K N p") and return
+    end
+
+    if k == 0
+      m.reply ("Your odds of getting 0 or more skillups is 1, doofus.") and return
+    end
+
+    begin
+      screwed = Distribution::Binomial::cdf(k-1, n, p)
+      ok = (1.0 - screwed).round(3)
+      m.reply("On #{n} feeds (p=#{p}), your odds of getting #{k} or more skillups is #{ok}.")
+    rescue ArgumentError => e
+      m.reply("Bad query: #{e.message}") 
+    end 
   end
 
   def pazudora_add (m, args)
@@ -245,7 +304,6 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
     argv = args.split(" ")
     if is_numeric?(argv.last)
       from = argv.pop.to_i
-      args = argv.join(" ")
     else
       from = 1
     end
@@ -253,6 +311,47 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
     pdx = PazudoraData.instance.get_puzzlemon(identifier)
     m.reply "Could not find puzzlemon #{identifier}" and return if pdx.nil?
     m.reply pdx.experience_output(from)
+  end
+
+  def pazudora_time(m, args)
+    argv = args.split(" ")
+    if argv.last.match(/(\+|\-)\d+/)
+      timezone = argv.pop
+      offset = timezone.to_i
+      offset = offset * -1 if offset < 0
+      if offset > 0 && offset < 10
+        offset = "0#{offset}"
+      elsif offset >= 24
+        m.reply "Invalid UTC offset #{offset}" and return
+      else
+        offset = offset.to_s
+      end
+      utc = "#{timezone[0,1]}#{offset}:00"
+    else
+      utc = "-07:00"
+    end
+
+    if argv.length == 1
+      given_time = argv.first
+      current_stamina = 0
+    elsif argv.length == 2
+      given_time = argv.last
+      current_stamina = argv.first.to_i
+    else
+      m.reply "USAGE: !pad time HH:MM TIMEZONE?" and return
+    end
+
+    t = DateTime.strptime(given_time + utc, "%H:%M%z").to_time
+    delta = t - Time.now
+    delta = (delta > 0) ? delta : delta + 86400
+    stamina = (delta / (60 * 10)).round
+
+    if current_stamina == 0
+      r = "By #{t.getlocal(utc).strftime("%I:%M%p")} UTC#{utc}, you will have gained #{stamina} stamina"
+    else 
+      r = "By #{t.getlocal(utc).strftime("%I:%M%p")} UTC#{utc}, you will have gained #{stamina} stamina, for a total of #{current_stamina + stamina}"
+    end
+    m.reply r
   end
 
   def pazudora_stamina(m, args)
@@ -281,7 +380,7 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       from = 0
       to = argv.last
     else
-      m.reply "USAGE: !pad stamina TO? FROM TIMEZONE?"
+      m.reply "USAGE: !pad stamina TO? FROM TIMEZONE?" and return
     end
 
     stamina_delta = to - from
@@ -304,12 +403,11 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
 
     if args == "tags" || args == "list_tags"
       r = "Use +[tags] to denote godfest; for example !pad pull +JGO for a japanese/greek/odins fest.\n"
-      r += "Known tags: [R]oman, [J]apanese, [H]indu, [N]orse, [E]gyptian, [G]reek, [O]dins"
+      r += "Known tags: [R]oman, [J]apanese, [H]indu or [I]ndian, [N]orse, [E]gyptian, [G]reek, [O]dins, [A]ngels, [Devils]"
       m.reply r
-    elsif is_numeric?(args) || args.match(/^\$\d+$/)
+    elsif is_numeric?(args)
       gods = []
-      attempts = is_numeric?(args) ? args.to_i : (stones_buyable(args.split("$").last.to_i)/5)
-      attempts.times do
+      args.to_i.times do
         pdx = PazudoraData.instance.gachapon(godfest_flags)
         stars = pdx.stars
         type = pdx.type
@@ -323,11 +421,11 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
         overflow = gods.length - 10
         gods = gods[0..9]
       end
-      price = stone_price(attempts * 5)
+      price = stone_price(args.to_i * 5)
       if gods.length == 0
-        r = "You rolled #{attempts} times (for $#{price}) and got jackshit all. Gungtrolled."
+        r = "You rolled #{args} times (for $#{price}) and got jackshit all. Gungtrolled."
       else
-        r = "You rolled #{attempts} times (for $#{price}) and got some gods:\n"
+        r = "You rolled #{args} times (for $#{price}) and got some gods:\n"
         r += gods.join(", ")
         if overflow > 0
           r += "...and #{overflow} more"
@@ -446,17 +544,6 @@ Input your timezone as an integer UTC offset, e.g +7 or -11. Defaults to -7 (pac
       money = money + prices[selection]
     end
     money
-  end
-
-  def stones_buyable(dollars)
-    prices = {1 => 1, 5 => 6, 10 => 12, 23 => 30, 44 => 60, 60 => 85}
-    stones = 0
-    while dollars > 0
-      selection = prices.keys.select{|x| x <= dollars}.max
-      stones += prices[selection]
-      dollars -= selection
-    end
-    stones
   end
 
   def rank_data
